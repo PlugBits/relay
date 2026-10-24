@@ -1,0 +1,9 @@
+{
+  "name": "plugbits-relay",
+  "version": "1.2.0",
+  "license": "MIT",
+  "description": "kintone のプラグインを Claude Code で作る mod",
+  "author": {
+    "name": "PlugBits"
+  }
+}

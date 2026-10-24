@@ -1,0 +1,21 @@
+{
+  "manifest_version": 1,
+  "version": 1,
+  "type": "APP",
+  "name": {
+    "ja": "サンプルプラグイン",
+    "en": "Sample Plugin"
+  },
+  "description": {
+    "ja": "kin-loop のテスト用プラグイン",
+    "en": "A sample plugin for kin-loop tests"
+  },
+  "icon": "icon.png",
+  "desktop": {
+    "js": ["desktop.js"]
+  },
+  "config": {
+    "html": "config.html",
+    "js": ["config.js"]
+  }
+}

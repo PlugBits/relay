@@ -1,0 +1,6 @@
+{
+  "name": "plugbits-relay",
+  "description": "kintone のプラグインを Claude Code で作る mod",
+  "owner": { "name": "PlugBits" },
+  "plugins": [{ "name": "plugbits-relay", "source": "./" }]
+}
