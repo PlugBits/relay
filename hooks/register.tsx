@@ -396,10 +396,26 @@ async function runToolSafe($: EngineInterface, script: string, args: string[], i
 
 // 反映・undo を 1 本ずつ流す(確認ボタンと保存の自動反映が重ならないように)
 let running: Promise<unknown> = Promise.resolve()
-function exclusive<T>(fn: () => Promise<T>): Promise<T> {
-  const next = running.then(fn, fn)
+let queued = 0 // 走っている・待っている数。0 なら待たずに始める(子プロセスを起こさない)
+function exclusive<T>($: EngineInterface, fn: () => Promise<T>): Promise<T> {
+  const start = queued > 0 ? waitFree($, running) : running
+  queued++
+  const next = start.then(fn, fn).finally(() => { queued-- })
   running = next.catch(() => undefined)
   return next
+}
+
+// 前の反映(保存の自動反映など)の終わりを待つ。素の Promise を待つ間は hook の持ち時間(10 秒)が減り、
+// 道具が「失敗」を返して反映だけが続く(10/24 Mac で2回)。$ の呼び出し(1 秒の子プロセス)を挟んで待つ間は減らない
+async function waitFree($: EngineInterface, p: Promise<unknown>): Promise<void> {
+  let settled = false
+  const q = p.then(() => { settled = true }, () => { settled = true })
+  const node = await findNode($).catch(() => 'node')
+  while (!settled) {
+    const tick = $.process.run([node, '-e', 'setTimeout(() => {}, 1000)'], { timeoutMs: 5000 }).then(() => true, () => false)
+    // 子プロセスが起動できない時は素で待つ(空回りしない)
+    if (!(await Promise.race([q.then(() => true), tick]))) return q
+  }
 }
 
 // mode は通信しない。dev → 'dev'、prod で許可アプリ → 'prod'、拒否・読めない → 'denied'(行は pane 用)
@@ -444,7 +460,7 @@ async function runOne($: EngineInterface, dir: string, name: string) {
     await setPending($, { kind: 'deploy', appId, dir, name })
     return
   }
-  await exclusive(() => deployNow($, dir, name, appId))
+  await exclusive($, () => deployNow($, dir, name, appId))
 }
 
 // v1.0 本番の関所: pane の上に小さなダイアログ(focus・Esc で閉じる=やめる)。開発のフォーム変更は pane の確認だけ
@@ -535,25 +551,25 @@ async function confirmYes($: EngineInterface): Promise<string | null> {
   if (p.kind === 'use' && p.profileId) {
     const pid = p.profileId
     const name = p.name ?? pid
-    await exclusive(() => useNow($, pid, name))
+    await exclusive($, () => useNow($, pid, name))
     return `kin: 接続先を ${name} に切り替えました(結果は pane)`
   }
   if (p.kind === 'deploy' && p.dir && p.name) {
     const { dir, name } = p
-    await exclusive(() => deployNow($, dir, name, p.appId))
+    await exclusive($, () => deployNow($, dir, name, p.appId))
     return `kin: アプリ ${p.appId} に反映しました(結果は pane)`
   }
   if (p.kind === 'form' && p.ops) {
     const ops = p.ops
-    await exclusive(() => formChangeNow($, p.appId, ops))
+    await exclusive($, () => formChangeNow($, p.appId, ops))
     return `kin: アプリ ${p.appId} のフォームを変更しました(結果は pane)`
   }
   if (p.kind === 'customize' && p.customize) {
     const c = p.customize
-    await exclusive(() => customizeNow($, p.appId, c))
+    await exclusive($, () => customizeNow($, p.appId, c))
     return `kin: アプリ ${p.appId} にカスタマイズを反映しました(結果は pane)`
   }
-  await exclusive(() => undoNow($, p.appId))
+  await exclusive($, () => undoNow($, p.appId))
   return `kin: アプリ ${p.appId} を元に戻す処理をしました(結果は pane)`
 }
 
@@ -643,7 +659,7 @@ async function useRequest($: EngineInterface, id: string): Promise<string> {
     await setPending($, { kind: 'use', appId: '', profileId: pid, name })
     return `kin: 接続先を本番の ${name} に切り替えます。pane の「切り替える」か /kin ok で進みます`
   }
-  await exclusive(() => useNow($, pid, name))
+  await exclusive($, () => useNow($, pid, name))
   return `kin: 接続先を ${name} に切り替えました(結果は pane)`
 }
 
@@ -974,7 +990,7 @@ async function undoRequest($: EngineInterface, appId: string): Promise<string> {
     await setPending($, { kind: 'undo', appId })
     return `kin: アプリ ${appId} を直前の状態に戻します(本番)。pane の「反映」か /kin ok で進みます`
   }
-  await exclusive(() => undoNow($, appId))
+  await exclusive($, () => undoNow($, appId))
   return `kin: アプリ ${appId} を元に戻す処理をしました(結果は pane)`
 }
 
@@ -1153,7 +1169,7 @@ async function deployTool($: EngineInterface, input: Record<string, unknown>): P
     const gate = await gateWrite($, appId, { kind: 'deploy', appId, dir: pluginDir, name })
     if (!gate.go) return gate.text
   }
-  const out = await exclusive(() => deployNow($, pluginDir, name, appId, true))
+  const out = await exclusive($, () => deployNow($, pluginDir, name, appId, true))
   if (ids.length > 1) {
     if (!out.dep.json?.ok && !out.dep.json?.apps) return toolError(out.dep.json, out.dep.raw)
     const dj = out.dep.json!
@@ -1169,7 +1185,7 @@ async function undoTool($: EngineInterface, input: Record<string, unknown>): Pro
   if (need(appId)) return need(appId)!
   const gate = await gateWrite($, appId, { kind: 'undo', appId })
   if (!gate.go) return gate.text
-  const r = await exclusive(() => undoNowTool($, appId))
+  const r = await exclusive($, () => undoNowTool($, appId))
   return r.json?.parts ? digestUndo(r.json, r.raw) : toolError(r.json, r.raw)
 }
 
@@ -1199,7 +1215,7 @@ async function customizeTool($: EngineInterface, input: Record<string, unknown>)
   if (keys.every(k => c[k].length === 0)) return safeJson({ ok: false, error: { code: 'bad_input', message: 'js / css のどれかにファイルを指定してください' } })
   const gate = await gateWrite($, appId, { kind: 'customize', appId, customize: c })
   if (!gate.go) return gate.text
-  const r = await exclusive(() => customizeNow($, appId, c))
+  const r = await exclusive($, () => customizeNow($, appId, c))
   return r.json?.ok ? safeJson(r.json) : toolError(r.json, r.raw)
 }
 
@@ -1365,7 +1381,7 @@ async function recordsWriteTool($: EngineInterface, i: Record<string, unknown>):
   if (!g.go) return g.text
   const tmp = await writeTmp($, 'rows', rows)
   try {
-    const r = await exclusive(() => runToolSafe($, 'kin-records.mjs', ['write', appId, '--rows', tmp, '--tag', tag]))
+    const r = await exclusive($, () => runToolSafe($, 'kin-records.mjs', ['write', appId, '--rows', tmp, '--tag', tag]))
     if (!r.json?.ok) return toolError(r.json, r.raw)
     await refreshTestCount($, appId)
     return safeJson({ ok: true, appId, tag, ids: r.json.ids ?? [], note: '片付けは kin_records_cleanup(または 次の一手 8)' })
@@ -1381,7 +1397,7 @@ async function recordsCleanupTool($: EngineInterface, i: Record<string, unknown>
   if (tag && !/^[A-Za-z0-9_-]{1,40}$/.test(tag)) return safeJson({ ok: false, error: { code: 'bad_input', message: 'tag は英数字と - _ だけ(40字まで)' } })
   const g = await recordsGate($, appId)
   if (!g.go) return g.text
-  const r = await exclusive(() => runToolSafe($, 'kin-records.mjs', ['cleanup', appId, ...(tag ? ['--tag', tag] : [])]))
+  const r = await exclusive($, () => runToolSafe($, 'kin-records.mjs', ['cleanup', appId, ...(tag ? ['--tag', tag] : [])]))
   if (!r.json?.ok) return toolError(r.json, r.raw)
   await refreshTestCount($, appId)
   return safeJson({ ok: true, appId, deleted: r.json.deleted, missing: r.json.missing, remaining: r.json.remaining })
@@ -1766,6 +1782,13 @@ export const register: Register = on => {
   })
 
   // 道具の呼び出しに答える。例外は秘密を伏せた JSON にして返す
+  // hook そのものが落ちた・持ち時間を越えた時も、何が起きたかを返す(書く道具は裏で続いていることがある)
+  const hookFailText = (name: string, err: { kind: string; message?: string }) => {
+    const writes = /^kin_(deploy|undo|customize|form_change|records_write|records_cleanup)$/.test(name)
+    const why = err.kind === 'timeout' ? '道具の返事が持ち時間を越えました' : `道具の中で例外が出ました: ${err.message ?? '(本文なし)'}`
+    const after = writes ? '。処理は裏で続いていて、成功していることがあります。pane の結果か kin_plugins で確かめてから、やり直すか決めてください' : ''
+    return safeJson({ ok: false, error: { code: err.kind === 'timeout' ? 'tool_timeout' : 'tool_failed', tool: name, message: `${why}${after}` } })
+  }
   for (const t of TOOLS) {
     on('tool.call', { tool: new RegExp(`^${TOOL_PREFIX}${t.name}$`) }, async ($, e) => {
       let text: string
@@ -1775,7 +1798,7 @@ export const register: Register = on => {
         text = safeJson({ ok: false, error: { code: 'tool_failed', message: err instanceof Error ? err.message : String(err) } })
       }
       return { result: text }
-    }).catch(() => ({ result: safeJson({ ok: false, error: { code: 'tool_failed', message: 'relay の道具が失敗しました' } }) }))
+    }).catch(($, e, next) => ({ result: hookFailText(t.name, next.error) }))
   }
 
   // plugins/<name>/ 配下の Edit/Write を見張る。ツールは止めない・拒否しない

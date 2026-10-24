@@ -2313,3 +2313,50 @@ test('v1.1.1 desktop: after a deploy the same two are small buttons at the head 
   expect(fills.at(-1)).toBe('アプリ 12 に、<やりたいこと> を作って')
   await m.ui.unmount()
 })
+
+test('tools: kin_deploy behind a running save-deploy waits through $.process.run and still reports 反映しました', { timeoutMs: 15000 }, async ($, on) => {
+  const calls: string[][] = []
+  const runs: string[][] = []
+  let release: () => void = () => undefined
+  const gate = new Promise<void>(r => (release = r))
+  toolHooks(on)
+  // 1回目の deploy だけ、テストが放すまで止める。それ以外は偽の道具と同じ
+  on('process.spawn', async function* (_: unknown, e: { argv: readonly string[] }) {
+    calls.push([...e.argv])
+    const [, file = '', ...args] = e.argv
+    if (file === '--version') {
+      yield { stream: 'stdout' as const, text: 'v24.0.0\n' }
+      return { value: { code: 0, signal: null } }
+    }
+    const f = file.split('/').pop() ?? ''
+    if (f === 'kin-build.mjs') {
+      yield { stream: 'stdout' as const, text: `${JSON.stringify(args.includes('--check') ? { ok: true, build: null } : { ok: true, built: false, dir: args[0] })}\n` }
+      return { value: { code: 0, signal: null } }
+    }
+    if (f === 'kin-loop.mjs' && args[0] === 'deploy' && deploys(calls).length === 1) await gate
+    const key = f === 'kin-loop.mjs' ? `${f} ${args[0]}` : f
+    yield { stream: 'stdout' as const, text: `${JSON.stringify(CONTRACT[key] ?? { ok: false, error: { message: `no script for ${key}` } })}\n` }
+    return { value: { code: 0, signal: null } }
+  })
+  // 待ち中の $.process.run(1 秒の子)は、少し置いて成功を返す
+  on('process.run', async (_: unknown, e: { argv: readonly string[] }) => {
+    runs.push([...e.argv])
+    await wait(50)
+    return { value: { exitCode: 0, stdout: '', stderr: '' } }
+  })
+  await $.session.start(START)
+  await $.command.run({ command: 'kin', args: '42' } as any)
+
+  // 保存の自動反映が走って止まっている間に、道具で同じプラグインを反映
+  await $.tool.call({ tool: 'Edit', file_path: '/w/plugins/foo/a.js', old_string: 'a', new_string: 'b' })
+  await wait(300)
+  expect(deploys(calls).length).toBe(1)
+  const pending = callTool($, 'kin_deploy', { pluginDir: 'plugins/foo', appId: '42' })
+  await wait(300)
+  expect(runs.some(r => r.includes('-e') && r.some(a => a.includes('setTimeout')))).toBe(true)
+  release()
+  const text = await pending
+  expect(text).toContain('反映しました')
+  expect(text).not.toContain('tool_failed')
+  expect(deploys(calls).length).toBe(2)
+})
